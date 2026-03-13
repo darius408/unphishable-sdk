@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.unphishable.sdk">
+
+    <!-- Required for VPN tunnel -->
+    <uses-permission android:name="android.permission.BIND_VPN_SERVICE" />
+
+    <!-- Required to start VPN as foreground service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Required to show warning notifications -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Required to call Unphishable backend -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Required to check network state before scanning -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application>
+
+        <!-- VPN Service — the core engine -->
+        <service
+            android:name="org.unphishable.sdk.core.UnphishableVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
+        <!-- Receives Proceed / Go Back taps from warning notifications -->
+        <receiver
+            android:name="org.unphishable.sdk.ui.UnphishableActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unphishable.sdk.ACTION_PROCEED" />
+                <action android:name="org.unphishable.sdk.ACTION_GO_BACK" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>
