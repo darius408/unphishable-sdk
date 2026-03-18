@@ -45,5 +45,5 @@ data class UnphishableConfig(
     val brandName: String,
     val trustedPackages: List<String> = emptyList(),
     val debug: Boolean = false,
-    val backendUrl: String = "https://unphishable-backend-production-8cf8.up.railway.app"
+    val backendUrl: String = "https://api.unphishable.org"
 )
