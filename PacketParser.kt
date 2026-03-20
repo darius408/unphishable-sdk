@@ -1,70 +1,85 @@
 package org.unphishable.sdk.utils
 
-import android.util.Log
+import java.nio.ByteBuffer
 
 /**
- * PacketParser — Extracts URLs from raw IP/TCP packets from the VPN tunnel.
+ * PacketParser — Extracts URLs from raw IP/TCP packets.
  *
- * HTTP:  Reads Host header + request path → full URL
- * HTTPS: Reads SNI from TLS ClientHello → domain only
- * Other: Returns null (traffic passes through silently)
+ * ONLY inspects:
+ * - HTTP (port 80)  → reads Host header + path → full URL
+ * - HTTPS (port 443) → reads SNI from TLS ClientHello → domain only
+ *
+ * ALL other traffic (video, images, APIs, games etc.) is ignored instantly.
+ * No payload content is ever read — only headers.
  */
 internal object PacketParser {
 
-    private const val TAG = "Unphishable:Parser"
-
     /**
-     * Parse a raw IP packet and extract a URL if present.
-     * Returns null if packet is not HTTP/HTTPS or URL cannot be extracted.
+     * Extract URL from raw packet bytes.
+     * Returns null immediately for non-HTTP/HTTPS traffic.
      */
     fun extractUrl(buffer: ByteArray, length: Int): String? {
-        return try {
-            val bytes = buffer.copyOf(length)
+        // Minimum IP + TCP header = 40 bytes
+        if (length < 40) return null
 
-            // Minimum IP header: 20 bytes
-            if (length < 20) return null
+        // Only handle IPv4
+        val ipVersion = (buffer[0].toInt() and 0xFF) shr 4
+        if (ipVersion != 4) return null
 
-            val ipVersion = (bytes[0].toInt() and 0xFF) shr 4
-            if (ipVersion != 4) return null // IPv6 not handled yet
+        // Only handle TCP (protocol 6)
+        val protocol = buffer[9].toInt() and 0xFF
+        if (protocol != 6) return null
 
-            val ipHeaderLength = (bytes[0].toInt() and 0x0F) * 4
-            val protocol = bytes[9].toInt() and 0xFF
+        val ipHeaderLen = (buffer[0].toInt() and 0x0F) * 4
+        if (length < ipHeaderLen + 20) return null
 
-            // Only handle TCP (protocol 6)
-            if (protocol != 6) return null
-            if (length < ipHeaderLength + 20) return null
+        // Get destination port
+        val destPort = ((buffer[ipHeaderLen + 2].toInt() and 0xFF) shl 8) or
+                (buffer[ipHeaderLen + 3].toInt() and 0xFF)
 
-            val tcpHeaderLength = ((bytes[ipHeaderLength + 12].toInt() and 0xFF) shr 4) * 4
-            val destPort = ((bytes[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or
-                    (bytes[ipHeaderLength + 3].toInt() and 0xFF)
+        // ONLY process HTTP (80) and HTTPS (443) — everything else ignored instantly
+        if (destPort != 80 && destPort != 443) return null
 
-            val payloadOffset = ipHeaderLength + tcpHeaderLength
-            if (payloadOffset >= length) return null
-            val payload = bytes.copyOfRange(payloadOffset, length)
+        val tcpHeaderLen = ((buffer[ipHeaderLen + 12].toInt() and 0xFF) shr 4) * 4
+        val payloadOffset = ipHeaderLen + tcpHeaderLen
+        if (payloadOffset >= length) return null
 
-            return when (destPort) {
-                80  -> extractHttpUrl(payload)
-                443 -> extractHttpsHost(payload)
-                else -> null
-            }
-        } catch (e: Exception) {
-            null
+        val payload = buffer.copyOfRange(payloadOffset, length)
+
+        return when (destPort) {
+            80   -> extractHttpUrl(payload)
+            443  -> extractHttpsHost(payload)
+            else -> null
         }
     }
 
+    // Overload for ByteBuffer compatibility
+    fun extractUrl(buffer: ByteBuffer, length: Int): String? {
+        val bytes = ByteArray(length)
+        val pos = buffer.position()
+        buffer.get(bytes, 0, length)
+        buffer.position(pos)
+        return extractUrl(bytes, length)
+    }
+
+    /**
+     * Extract full URL from HTTP packet.
+     * Reads only the first line (request line) and Host header.
+     * Never reads body content.
+     */
     private fun extractHttpUrl(payload: ByteArray): String? {
         return try {
             val text = String(payload, Charsets.ISO_8859_1)
+
+            // Only process HTTP requests
             if (!text.startsWith("GET ") && !text.startsWith("POST ") &&
-                !text.startsWith("HEAD ") && !text.startsWith("PUT ")) return null
+                !text.startsWith("HEAD ") && !text.startsWith("PUT ") &&
+                !text.startsWith("DELETE ") && !text.startsWith("PATCH ")) return null
 
             val lines = text.split("\r\n")
-            val requestLine = lines.firstOrNull() ?: return null
-            val parts = requestLine.split(" ")
-            val path = if (parts.size >= 2) parts[1] else "/"
-
-            val hostLine = lines.firstOrNull { it.startsWith("Host:", ignoreCase = true) }
-            val host = hostLine?.substringAfter(":")?.trim() ?: return null
+            val path = lines.firstOrNull()?.split(" ")?.getOrNull(1) ?: "/"
+            val host = lines.firstOrNull { it.startsWith("Host:", ignoreCase = true) }
+                ?.substringAfter(":")?.trim() ?: return null
 
             "http://$host$path"
         } catch (e: Exception) {
@@ -72,66 +87,71 @@ internal object PacketParser {
         }
     }
 
+    /**
+     * Extract domain from HTTPS packet via SNI field in TLS ClientHello.
+     * SNI = Server Name Indication — the domain the client is connecting to.
+     * This is sent in plaintext before encryption — no decryption needed.
+     * Never reads encrypted payload.
+     */
     private fun extractHttpsHost(payload: ByteArray): String? {
         return try {
-            // TLS record: type=22 (handshake), version, length
+            // TLS record: type=22 (handshake)
             if (payload.size < 5) return null
-            if (payload[0].toInt() and 0xFF != 22) return null // not handshake
+            if (payload[0].toInt() and 0xFF != 22) return null
 
             // Handshake type: 1 = ClientHello
             if (payload.size < 6) return null
             if (payload[5].toInt() and 0xFF != 1) return null
 
-            // Parse SNI extension from ClientHello
             extractSni(payload)
         } catch (e: Exception) {
             null
         }
     }
 
+    /**
+     * Parse SNI extension from TLS ClientHello.
+     * SNI is always sent in plaintext — this is by design in TLS.
+     */
     private fun extractSni(data: ByteArray): String? {
         return try {
-            var i = 43 // Skip fixed fields in ClientHello
-
+            var i = 43
             if (i >= data.size) return null
 
             // Skip session ID
-            val sessionIdLength = data[i].toInt() and 0xFF
-            i += 1 + sessionIdLength
+            val sessionIdLen = data[i].toInt() and 0xFF
+            i += 1 + sessionIdLen
             if (i + 2 >= data.size) return null
 
             // Skip cipher suites
-            val cipherSuitesLength = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
-            i += 2 + cipherSuitesLength
+            val cipherLen = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
+            i += 2 + cipherLen
             if (i + 1 >= data.size) return null
 
             // Skip compression methods
-            val compressionLength = data[i].toInt() and 0xFF
-            i += 1 + compressionLength
+            val compressionLen = data[i].toInt() and 0xFF
+            i += 1 + compressionLen
             if (i + 2 >= data.size) return null
 
-            // Extensions length
-            val extensionsLength = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
+            // Parse extensions
+            val extLen = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
             i += 2
-            val extensionsEnd = i + extensionsLength
+            val extEnd = i + extLen
 
-            // Walk extensions looking for SNI (type 0x0000)
-            while (i + 4 <= extensionsEnd && i + 4 <= data.size) {
+            while (i + 4 <= extEnd && i + 4 <= data.size) {
                 val extType = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
-                val extLength = ((data[i + 2].toInt() and 0xFF) shl 8) or (data[i + 3].toInt() and 0xFF)
+                val extDataLen = ((data[i + 2].toInt() and 0xFF) shl 8) or (data[i + 3].toInt() and 0xFF)
                 i += 4
 
-                if (extType == 0) { // SNI extension
-                    if (i + 5 <= data.size) {
-                        // Skip SNI list length (2) + type (1) + name length (2)
-                        val nameLength = ((data[i + 3].toInt() and 0xFF) shl 8) or (data[i + 4].toInt() and 0xFF)
-                        if (i + 5 + nameLength <= data.size) {
-                            val sni = String(data, i + 5, nameLength, Charsets.US_ASCII)
-                            return "https://$sni"
-                        }
+                if (extType == 0 && i + 5 <= data.size) {
+                    // SNI extension found
+                    val nameLen = ((data[i + 3].toInt() and 0xFF) shl 8) or (data[i + 4].toInt() and 0xFF)
+                    if (i + 5 + nameLen <= data.size) {
+                        val sni = String(data, i + 5, nameLen, Charsets.US_ASCII)
+                        return "https://$sni"
                     }
                 }
-                i += extLength
+                i += extDataLen
             }
             null
         } catch (e: Exception) {
