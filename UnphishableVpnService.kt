@@ -9,8 +9,8 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import kotlinx.coroutines.*
-import org.unphishable.sdk.network.ScanApiClient
 import org.unphishable.sdk.model.ScanResult
+import org.unphishable.sdk.network.ScanApiClient
 import org.unphishable.sdk.ui.WarningNotificationManager
 import org.unphishable.sdk.utils.PacketParser
 import java.io.FileInputStream
@@ -113,12 +113,13 @@ class UnphishableVpnService : VpnService() {
                 val length = input.read(buffer)
                 if (length <= 0) continue
 
-                // Always forward packet immediately — fail open
+                // ALWAYS forward packet immediately — WARN NEVER BLOCK
                 output.write(buffer, 0, length)
 
+                // Extract URL asynchronously — never delays traffic
                 val url = PacketParser.extractUrl(buffer, length) ?: continue
 
-                // Check local cache
+                // Check local cache first
                 val cached = localCache[url]
                 if (cached != null && System.currentTimeMillis() < cached.expiresAt) {
                     val result = cached.result
@@ -134,10 +135,11 @@ class UnphishableVpnService : VpnService() {
                     continue
                 }
 
-                // Skip if already scanning
+                // Skip if already scanning this URL
                 if (inFlightScans.putIfAbsent(url, true) != null) continue
 
-                serviceScope.launch {
+                // Scan in background
+                launch {
                     try {
                         val result = apiClient.scan(url)
 
@@ -147,9 +149,10 @@ class UnphishableVpnService : VpnService() {
                         )
 
                         if (localCache.size > 1000) {
-                            localCache.entries
+                            val expired = localCache.entries
                                 .filter { System.currentTimeMillis() > it.value.expiresAt }
-                                .forEach { localCache.remove(it.key) }
+                                .map { it.key }
+                            expired.forEach { localCache.remove(it) }
                         }
 
                         if (!result.safe) {
@@ -165,7 +168,6 @@ class UnphishableVpnService : VpnService() {
                         if (Unphishable.config?.debug == true) {
                             Log.d(TAG, "[${result.riskLevel}] $url — score: ${result.score}")
                         }
-
                     } catch (e: Exception) {
                         Log.e(TAG, "Scan failed for $url: ${e.message}")
                     } finally {
@@ -182,55 +184,32 @@ class UnphishableVpnService : VpnService() {
     private fun stopVpn() {
         isRunning = false
         serviceScope.cancel()
-        try {
-            vpnInterface?.close()
-            vpnInterface = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing VPN: ${e.message}")
-        }
+        try { vpnInterface?.close(); vpnInterface = null } catch (e: Exception) { }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-        if (Unphishable.config?.debug == true) Log.d(TAG, "VPN stopped")
     }
 
-    override fun onRevoke() {
-        stopVpn()
-    }
-
-    override fun onDestroy() {
-        stopVpn()
-        super.onDestroy()
-    }
+    override fun onRevoke() { stopVpn() }
+    override fun onDestroy() { stopVpn(); super.onDestroy() }
 
     private fun buildForegroundNotification(brandName: String): Notification {
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
-            NotificationChannel(
-                CHANNEL_ID,
-                "Secure Mode",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
+            NotificationChannel(CHANNEL_ID, "Secure Mode",
+                NotificationManager.IMPORTANCE_LOW).apply {
                 description = "Secure Mode is active"
             }
         )
-
         val stopIntent = PendingIntent.getService(
             this, 0,
-            Intent(this, UnphishableVpnService::class.java).apply {
-                action = ACTION_STOP
-            },
+            Intent(this, UnphishableVpnService::class.java).apply { action = ACTION_STOP },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("🛡️ $brandName Secure Mode")
             .setContentText("Protecting you from phishing links")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .addAction(
-                Notification.Action.Builder(
-                    null, "Turn Off", stopIntent
-                ).build()
-            )
+            .addAction(Notification.Action.Builder(null, "Turn Off", stopIntent).build())
             .setOngoing(true)
             .build()
     }
