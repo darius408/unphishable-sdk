@@ -6,45 +6,26 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.util.Log
+import org.unphishable.sdk.model.ScanHistoryEntry
 import org.unphishable.sdk.model.UnphishableConfig
+import java.util.Collections
 
-/**
- * Unphishable SDK — Device-wide phishing protection for Android.
- *
- * Step 1 — Initialize once in Application.onCreate():
- *
- *   Unphishable.init(
- *       app         = this,
- *       apiKey      = "unph_live_xxx",
- *       brandName   = "PalmPay",
- *       trustedPackages = listOf(packageName)
- *   )
- *
- * Step 2 — Add a Secure Mode toggle in your app:
- *
- *   Unphishable.startSecureMode(activity)  // user turns ON
- *   Unphishable.stopSecureMode(context)    // user turns OFF
- *
- * That's it. The SDK handles everything else.
- */
 object Unphishable {
 
     private const val TAG = "Unphishable"
     private const val PREFS_NAME = "unphishable_prefs"
     private const val KEY_SECURE_MODE = "secure_mode_active"
+    private const val KEY_TOTAL_SCANS = "total_scans"
+    private const val KEY_THREATS_BLOCKED = "threats_blocked"
 
     internal var config: UnphishableConfig? = null
 
+    // Historique en mémoire (max 100 entrées)
+    private val _scanHistory = Collections.synchronizedList(mutableListOf<ScanHistoryEntry>())
+    val scanHistory: List<ScanHistoryEntry> get() = _scanHistory.toList()
+
     /**
-     * Initialize the SDK.
-     * Call once in Application.onCreate() — before anything else.
-     *
-     * @param app             Your Application instance
-     * @param apiKey          Your partner API key (unph_live_...)
-     * @param brandName       Your brand name shown on warning notifications
-     * @param trustedPackages List of package names whose traffic is never scanned
-     *                        Always include your own app: listOf(packageName)
-     * @param debug           Enable verbose logging — disable in production
+     * Initialise le SDK. À appeler dans Application.onCreate() ou MainActivity.onCreate().
      */
     @JvmStatic
     fun init(
@@ -52,39 +33,33 @@ object Unphishable {
         apiKey: String,
         brandName: String,
         trustedPackages: List<String> = emptyList(),
-        debug: Boolean = false
+        debug: Boolean = true
     ) {
-        require(apiKey.isNotBlank()) { "Unphishable: apiKey must not be empty" }
-        require(brandName.isNotBlank()) { "Unphishable: brandName must not be empty" }
+        require(apiKey.isNotBlank()) { "Unphishable: apiKey ne doit pas être vide" }
+        require(brandName.isNotBlank()) { "Unphishable: brandName ne doit pas être vide" }
 
         config = UnphishableConfig(
-            apiKey          = apiKey,
-            brandName       = brandName,
+            apiKey = apiKey,
+            brandName = brandName,
             trustedPackages = trustedPackages,
-            debug           = debug
+            debug = debug
         )
 
-        // Auto-restart Secure Mode if it was active before app restart
+        // Redémarrage automatique si le mode sécurisé était actif
         if (isSecureModeActive(app)) {
-            if (debug) Log.d(TAG, "Restoring Secure Mode after restart")
+            if (debug) Log.d(TAG, "Restauration du Mode Sécurisé après redémarrage")
             startVpnService(app)
         }
 
-        if (debug) Log.d(TAG, "Unphishable SDK initialized — brand: $brandName")
+        if (debug) Log.d(TAG, "SDK Unphishable initialisé — brand: $brandName, debug: $debug")
     }
 
     /**
-     * Start Secure Mode — begins device-wide phishing protection.
+     * Démarre le Mode Sécurisé (protection anti-phishing).
+     * Android demande la permission VPN au premier lancement.
      *
-     * Android requires the user to approve the VPN connection on first launch.
-     * This method handles that automatically via the VpnService.prepare() flow.
-     *
-     * Call from an Activity (needed for the VPN permission dialog).
-     *
-     * @param activity         The current Activity
-     * @param onPermissionNeeded Called with an Intent if VPN permission dialog must be shown.
-     *                           Start this intent with startActivityForResult(intent, VPN_REQUEST_CODE)
-     *                           Then call startSecureMode() again in onActivityResult.
+     * @param activity L'activité courante
+     * @param onPermissionNeeded Appelé avec l'Intent si le dialogue VPN doit être affiché
      */
     @JvmStatic
     fun startSecureMode(
@@ -92,28 +67,24 @@ object Unphishable {
         onPermissionNeeded: (Intent) -> Unit
     ) {
         val cfg = config ?: run {
-            Log.e(TAG, "Call Unphishable.init() before startSecureMode()")
+            Log.e(TAG, "Appelez Unphishable.init() avant startSecureMode()")
             return
         }
 
-        // Check if VPN permission is already granted
         val permIntent = VpnService.prepare(activity)
         if (permIntent != null) {
-            // Permission not yet granted — show system VPN dialog
-            if (cfg.debug) Log.d(TAG, "VPN permission required — showing dialog")
+            if (cfg.debug) Log.d(TAG, "Permission VPN requise — affichage dialogue")
             onPermissionNeeded(permIntent)
             return
         }
 
-        // Permission already granted — start immediately
         startVpnService(activity)
         saveSecureModeState(activity, true)
-        if (cfg.debug) Log.d(TAG, "Secure Mode started ✅")
+        if (cfg.debug) Log.d(TAG, "Mode Sécurisé démarré ✅")
     }
 
     /**
-     * Stop Secure Mode — turns off device-wide protection.
-     * Safe to call even if Secure Mode is not currently active.
+     * Arrête le Mode Sécurisé.
      */
     @JvmStatic
     fun stopSecureMode(context: Context) {
@@ -123,35 +94,57 @@ object Unphishable {
             }
         )
         saveSecureModeState(context, false)
-        if (config?.debug == true) Log.d(TAG, "Secure Mode stopped")
+        if (config?.debug == true) Log.d(TAG, "Mode Sécurisé arrêté")
     }
 
-    /**
-     * Returns true if Secure Mode is currently active.
-     */
     @JvmStatic
     fun isSecureModeActive(context: Context): Boolean {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_SECURE_MODE, false)
     }
 
-    /**
-     * Returns true if SDK has been initialized.
-     */
     @JvmStatic
     fun isInitialized(): Boolean = config != null
 
-    // ── Internal ──────────────────────────────────────────────────────────────
+    fun getTotalScans(context: Context): Int {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_TOTAL_SCANS, 0)
+    }
 
-    private fun startVpnService(context: Context) {
-        val intent = Intent(context, UnphishableVpnService::class.java)
-        context.startForegroundService(intent)
+    fun getThreatsBlocked(context: Context): Int {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_THREATS_BLOCKED, 0)
+    }
+
+    // Vide l'historique en mémoire (appelé au démarrage du service VPN)
+    internal fun clearHistory() {
+        _scanHistory.clear()
+    }
+
+    internal fun recordScan(context: Context, entry: ScanHistoryEntry) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putInt(KEY_TOTAL_SCANS, prefs.getInt(KEY_TOTAL_SCANS, 0) + 1)
+            .apply()
+
+        if (entry.riskLevel != "SAFE") {
+            prefs.edit()
+                .putInt(KEY_THREATS_BLOCKED, prefs.getInt(KEY_THREATS_BLOCKED, 0) + 1)
+                .apply()
+        }
+
+        _scanHistory.add(0, entry)
+        if (_scanHistory.size > 100) _scanHistory.removeAt(_scanHistory.size - 1)
+    }
+
+    internal fun startVpnService(context: Context) {
+        context.startForegroundService(
+            Intent(context, UnphishableVpnService::class.java)
+        )
     }
 
     private fun saveSecureModeState(context: Context, active: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_SECURE_MODE, active)
-            .apply()
+            .edit().putBoolean(KEY_SECURE_MODE, active).apply()
     }
 }
