@@ -16,31 +16,35 @@ import org.unphishable.sdk.model.UnphishableConfig
 internal object WarningNotificationManager {
 
     private const val TAG = "Unphishable:Notify"
-    const val CHANNEL_HIGH = "unphishable_high"
-    const val CHANNEL_MEDIUM = "unphishable_medium"
-    const val ACTION_PROCEED = "org.unphishable.sdk.ACTION_PROCEED"
-    const val ACTION_GO_BACK = "org.unphishable.sdk.ACTION_GO_BACK"
-    const val EXTRA_URL = "unphishable_url"
-    const val EXTRA_NOTIF_ID = "unphishable_notif_id"
+    private const val CHANNEL_HIGH   = "unphishable_high_risk"
+    private const val CHANNEL_MEDIUM = "unphishable_medium_risk"
+
+    const val ACTION_PROCEED  = "org.unphishable.sdk.ACTION_PROCEED"
+    const val ACTION_GO_BACK  = "org.unphishable.sdk.ACTION_GO_BACK"
+    const val EXTRA_URL       = "unphishable_url"
+    const val EXTRA_NOTIF_ID  = "unphishable_notif_id"
+    const val EXTRA_RISK      = "unphishable_risk"
+    const val EXTRA_SCORE     = "unphishable_score"
+    const val EXTRA_PATTERNS  = "unphishable_patterns"
 
     fun createChannels(context: Context) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_HIGH, "High Risk Warnings",
+            NotificationChannel(CHANNEL_HIGH, "Alertes Phishing Élevé",
                 NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Phishing link alerts"
+                description = "Alertes pour liens de phishing à haut risque"
                 enableLights(true)
                 lightColor = Color.RED
                 enableVibration(true)
-                vibrationPattern = longArrayOf(0, 300, 100, 300)
+                vibrationPattern = longArrayOf(0, 400, 100, 400)
             }
         )
 
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_MEDIUM, "Suspicious Link Warnings",
+            NotificationChannel(CHANNEL_MEDIUM, "Liens Suspects",
                 NotificationManager.IMPORTANCE_DEFAULT).apply {
-                description = "Suspicious link alerts"
+                description = "Alertes pour liens suspects"
                 enableLights(true)
                 lightColor = Color.YELLOW
             }
@@ -48,21 +52,13 @@ internal object WarningNotificationManager {
     }
 
     fun showWarning(context: Context, result: ScanResult, config: UnphishableConfig) {
-        val notifId = result.url.hashCode()
+        val notifId   = result.url.hashCode()
         val channelId = if (result.isHigh) CHANNEL_HIGH else CHANNEL_MEDIUM
+        val isHigh    = result.isHigh
 
-        val proceedIntent = PendingIntent.getBroadcast(
-            context, notifId + 1,
-            Intent(ACTION_PROCEED).apply {
-                setPackage(context.packageName)
-                putExtra(EXTRA_URL, result.url)
-                putExtra(EXTRA_NOTIF_ID, notifId)
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
 
         val goBackIntent = PendingIntent.getBroadcast(
-            context, notifId + 2,
+            context, notifId + 1,
             Intent(ACTION_GO_BACK).apply {
                 setPackage(context.packageName)
                 putExtra(EXTRA_URL, result.url)
@@ -71,76 +67,54 @@ internal object WarningNotificationManager {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val emoji = if (result.isHigh) "🚨" else "⚠️"
-        val riskLabel = if (result.isHigh) "HIGH RISK" else "MEDIUM RISK"
-        val title = "$emoji $riskLabel — ${result.domain.ifBlank { result.url }}"
+        // Bouton "Continuer quand même"
+        val proceedIntent = PendingIntent.getBroadcast(
+            context, notifId + 2,
+            Intent(ACTION_PROCEED).apply {
+                setPackage(context.packageName)
+                putExtra(EXTRA_URL, result.url)
+                putExtra(EXTRA_NOTIF_ID, notifId)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
-        val ssl = when (result.sslStatus.lowercase()) {
-            "valid"           -> "✅ SSL Valid"
-            "invalid", "error"-> "❌ SSL Invalid"
-            "none", "no ssl"  -> "❌ No SSL"
-            else              -> "⚠️ SSL Unknown"
+        val emoji = if (isHigh) "🚨" else "⚠️"
+        val title = if (isHigh) "$emoji Lien de Phishing Détecté !"
+                    else        "$emoji Lien Suspect Détecté"
+
+        val bodyText = when {
+            result.warningMessage.isNotBlank() -> result.warningMessage
+            isHigh -> "Ce lien est dangereux. N'entrez pas vos informations personnelles ou bancaires."
+            else   -> "Ce lien présente des caractéristiques suspectes. Soyez prudent."
         }
 
-        val age = if (result.ageMonths != null) {
-            when {
-                result.ageMonths < 1 -> "⚠️ Domain age: < 1 month"
-                result.ageMonths < 6 -> "⚠️ Domain age: ${result.ageMonths} months"
-                else                 -> "✅ Domain age: ${result.ageMonths} months"
-            }
-        } else "Domain age: Unknown"
-
-        val http = if (result.httpCode != null) "HTTP: ${result.httpCode}" else ""
-
-        val patterns = if (result.patternsTriggered.isNotEmpty())
-            "Patterns: ${result.patternsTriggered.take(3).joinToString(", ")}"
+        val patternText = if (result.patternsTriggered.isNotEmpty())
+            "\n\nSignaux détectés : ${result.patternsTriggered.take(3).joinToString(", ")}"
         else ""
 
-        val warning = result.warningMessage.ifBlank {
-            if (result.isHigh)
-                "Do not enter personal or financial information on this site."
-            else
-                "This link has suspicious patterns. Proceed with caution."
-        }
-
-        val bigText = buildString {
-            appendLine("Score: ${result.score}/100")
-            appendLine(ssl)
-            appendLine(age)
-            if (http.isNotBlank()) appendLine(http)
-            if (patterns.isNotBlank()) appendLine(patterns)
-            appendLine()
-            appendLine(warning)
-            append("Protected by ${config.brandName}")
-        }
+        val scoreText = "\nScore de risque : ${result.score}/100"
 
         val notification = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle(title)
-            .setContentText("Score: ${result.score}/100  •  $ssl")
-            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
-            .setPriority(
-                if (result.isHigh) NotificationCompat.PRIORITY_HIGH
-                else NotificationCompat.PRIORITY_DEFAULT
+            .setContentText(bodyText)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText("$bodyText$scoreText$patternText\n\nProtégé par ${config.brandName}")
             )
-            .setColor(if (result.isHigh) Color.RED else Color.parseColor("#FF8F00"))
-            .setAutoCancel(false)
-            .setOngoing(false)
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "Go Back", goBackIntent
-            )
-            .addAction(
-                android.R.drawable.ic_menu_send,
-                "Proceed Anyway", proceedIntent
-            )
+            .setPriority(if (isHigh) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
+            .setColor(if (isHigh) Color.RED else Color.parseColor("#FF8F00"))
+            .setAutoCancel(true)
+            .setContentIntent(tapIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "🔙 Revenir", goBackIntent)
+            .addAction(android.R.drawable.ic_menu_send, "⚠️ Continuer", proceedIntent)
             .build()
 
         try {
             NotificationManagerCompat.from(context).notify(notifId, notification)
-            if (config.debug) Log.d(TAG, "Warning shown — ${result.riskLevel} — ${result.url}")
+            if (config.debug) Log.d(TAG, "Alerte affichée : ${result.url} — ${result.riskLevel} (${result.score})")
         } catch (e: SecurityException) {
-            Log.w(TAG, "Notification permission not granted: ${e.message}")
+            Log.w(TAG, "Permission notification refusée : ${e.message}")
         }
     }
 
@@ -151,25 +125,24 @@ internal object WarningNotificationManager {
 
 class UnphishableActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val url = intent.getStringExtra(WarningNotificationManager.EXTRA_URL) ?: return
+        val url     = intent.getStringExtra(WarningNotificationManager.EXTRA_URL) ?: return
         val notifId = intent.getIntExtra(WarningNotificationManager.EXTRA_NOTIF_ID, 0)
-
         WarningNotificationManager.dismiss(context, notifId)
 
         when (intent.action) {
             WarningNotificationManager.ACTION_PROCEED -> {
-                val browserIntent = Intent(Intent.ACTION_VIEW,
-                    android.net.Uri.parse(url)).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
                 try {
-                    context.startActivity(browserIntent)
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
                 } catch (e: Exception) {
-                    Log.e("Unphishable", "Could not open URL: ${e.message}")
+                    Log.e("Unphishable", "Impossible d'ouvrir l'URL : ${e.message}")
                 }
             }
             WarningNotificationManager.ACTION_GO_BACK -> {
-                // User chose safety — URL is not opened
+                Log.d("Unphishable", "Utilisateur a refusé : $url")
             }
         }
     }
