@@ -154,3 +154,4 @@ object Unphishable {
             .putBoolean(KEY_SECURE_MODE, active)
             .apply()
     }
+}
