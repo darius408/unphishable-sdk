@@ -1,4 +1,0 @@
-<resources>
-    <string name="app_name">TestApp</string>
-    <string name="accessibility_service_description">Unphishable surveille les URLs dans votre navigateur pour vous protéger du phishing.</string>
-</resources>
