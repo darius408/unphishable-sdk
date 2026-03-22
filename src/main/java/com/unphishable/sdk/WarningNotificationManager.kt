@@ -56,7 +56,6 @@ internal object WarningNotificationManager {
         val channelId = if (result.isHigh) CHANNEL_HIGH else CHANNEL_MEDIUM
         val isHigh    = result.isHigh
 
-
         val goBackIntent = PendingIntent.getBroadcast(
             context, notifId + 1,
             Intent(ACTION_GO_BACK).apply {
@@ -67,7 +66,6 @@ internal object WarningNotificationManager {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Bouton "Continuer quand même"
         val proceedIntent = PendingIntent.getBroadcast(
             context, notifId + 2,
             Intent(ACTION_PROCEED).apply {
@@ -105,7 +103,6 @@ internal object WarningNotificationManager {
             .setPriority(if (isHigh) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
             .setColor(if (isHigh) Color.RED else Color.parseColor("#FF8F00"))
             .setAutoCancel(true)
-            .setContentIntent(tapIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "🔙 Revenir", goBackIntent)
             .addAction(android.R.drawable.ic_menu_send, "⚠️ Continuer", proceedIntent)
             .build()
