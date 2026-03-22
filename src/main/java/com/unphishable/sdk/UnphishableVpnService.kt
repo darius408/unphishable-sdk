@@ -9,14 +9,12 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import kotlinx.coroutines.*
-import org.unphishable.sdk.model.ScanHistoryEntry
 import org.unphishable.sdk.model.ScanResult
 import org.unphishable.sdk.network.ScanApiClient
 import org.unphishable.sdk.ui.WarningNotificationManager
 import org.unphishable.sdk.utils.PacketParser
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 
 class UnphishableVpnService : VpnService() {
@@ -40,7 +38,6 @@ class UnphishableVpnService : VpnService() {
         const val ACTION_SCAN_URL    = "org.unphishable.sdk.SCAN_URL"
         const val EXTRA_URL_TO_SCAN  = "url_to_scan"
 
-        // Navigateurs exclus du tunnel VPN — détectés via AccessibilityService
         val BROWSER_PACKAGES = listOf(
             "com.android.chrome",
             "org.mozilla.firefox",
@@ -57,7 +54,6 @@ class UnphishableVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // URL envoyée par l'AccessibilityService depuis un navigateur
         if (intent?.action == ACTION_SCAN_URL) {
             val url = intent.getStringExtra(EXTRA_URL_TO_SCAN) ?: return START_NOT_STICKY
             val config = Unphishable.config ?: return START_NOT_STICKY
@@ -77,7 +73,6 @@ class UnphishableVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
-        Unphishable.clearHistory()
         WarningNotificationManager.createChannels(this)
         startForeground(FOREGROUND_ID, buildForegroundNotification(config.brandName))
         startVpn()
@@ -99,14 +94,12 @@ class UnphishableVpnService : VpnService() {
                 .addDnsServer("8.8.8.8")
                 .addDnsServer("1.1.1.1")
                 .setMtu(32767)
-                .setBlocking(false) // ✅ Non-bloquant — internet ne se coupe pas
+                .setBlocking(false)
 
-            // Exclure les navigateurs — gérés par AccessibilityService
             BROWSER_PACKAGES.forEach { pkg ->
                 try { builder.addDisallowedApplication(pkg) } catch (e: Exception) { }
             }
 
-            // Exclure l'app elle-même et les services système
             listOf(packageName, "com.google.android.gms", "com.android.vending").forEach { pkg ->
                 try { builder.addDisallowedApplication(pkg) } catch (e: Exception) { }
             }
@@ -128,9 +121,7 @@ class UnphishableVpnService : VpnService() {
             isRunning = true
             if (config.debug) Log.d(TAG, "VPN tunnel established ✅")
 
-            serviceScope.launch {
-                readPackets(apiClient)
-            }
+            serviceScope.launch { readPackets(apiClient) }
 
         } catch (e: Exception) {
             Log.e(TAG, "VPN start failed: ${e.message}")
@@ -151,11 +142,9 @@ class UnphishableVpnService : VpnService() {
                 val length = input.read(buffer)
                 if (length <= 0) { delay(10); continue }
 
-                // ALWAYS forward packet immediately — NEVER BLOCK
                 output.write(buffer, 0, length)
                 output.flush()
 
-                // Extract URL asynchronously — never delays traffic
                 val packetCopy = buffer.copyOf(length)
                 serviceScope.launch {
                     try {
@@ -171,11 +160,9 @@ class UnphishableVpnService : VpnService() {
     }
 
     private suspend fun scanUrl(url: String, apiClient: ScanApiClient) {
-        // Ignorer les URLs internes
         if (url.contains("10.0.0.") || url.contains("127.0.0.1") ||
             url.contains("localhost") || url.length < 10) return
 
-        // Vérifier le cache local
         val cached = localCache[url]
         if (cached != null && System.currentTimeMillis() < cached.expiresAt) {
             val result = cached.result
@@ -189,7 +176,6 @@ class UnphishableVpnService : VpnService() {
             return
         }
 
-        // Skip si déjà en cours de scan
         if (inFlightScans.putIfAbsent(url, true) != null) return
 
         try {
@@ -205,20 +191,6 @@ class UnphishableVpnService : VpnService() {
                     .filter { System.currentTimeMillis() > it.value.expiresAt }
                     .forEach { localCache.remove(it.key) }
             }
-
-            // Enregistrer dans l'historique
-            Unphishable.recordScan(
-                this@UnphishableVpnService,
-                ScanHistoryEntry(
-                    url = url,
-                    riskLevel = result.riskLevel,
-                    score = result.score,
-                    timestamp = System.currentTimeMillis(),
-                    domain = result.domain.ifBlank {
-                        url.removePrefix("https://").removePrefix("http://").substringBefore("/")
-                    }
-                )
-            )
 
             if (!result.safe) {
                 withContext(Dispatchers.Main) {
