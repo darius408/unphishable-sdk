@@ -47,3 +47,11 @@ data class UnphishableConfig(
     val debug: Boolean = false,
     val backendUrl: String = "https://api.unphishable.org"
 )
+
+data class ScanHistoryEntry(
+    val url: String,
+    val riskLevel: String,
+    val score: Int,
+    val timestamp: Long,
+    val domain: String
+)
